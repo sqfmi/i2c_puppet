@@ -45,23 +45,39 @@ static int64_t timer_task(alarm_id_t id, void *user_data)
 	return USB_TASK_INTERVAL_US;
 }
 
-static void key_cb(uint8_t key, enum key_state state)
+static void key_cb(char key, enum key_state state)
 {
+	// Don't send mods over USB
+	if ((key == KEY_MOD_SHL) ||
+		(key == KEY_MOD_SHR) ||
+		(key == KEY_MOD_ALT) ||
+		(key == KEY_MOD_SYM))
+		return;
+
 	if (tud_hid_n_ready(USB_ITF_KEYBOARD) && reg_is_bit_set(REG_ID_CF2, CF2_USB_KEYB_ON)) {
+		uint8_t conv_table[128][2]		= { HID_ASCII_TO_KEYCODE };
+		conv_table['\n'][1]				= HID_KEY_ENTER; // Fixup: Enter instead of Return
+		conv_table[KEY_JOY_UP][1]		= HID_KEY_ARROW_UP;
+		conv_table[KEY_JOY_DOWN][1]		= HID_KEY_ARROW_DOWN;
+		conv_table[KEY_JOY_LEFT][1]		= HID_KEY_ARROW_LEFT;
+		conv_table[KEY_JOY_RIGHT][1]	= HID_KEY_ARROW_RIGHT;
+
 		uint8_t keycode[6] = { 0 };
-		uint8_t modifiers = 0;
+		uint8_t modifier   = 0;
 
 		if (state == KEY_STATE_PRESSED) {
-			keycode[0] = key;
+			if (conv_table[(int)key][0])
+				modifier = KEYBOARD_MODIFIER_LEFTSHIFT;
+
+			keycode[0] = conv_table[(int)key][1];
 		}
 
-		if (state != KEY_STATE_HOLD) {
-			tud_hid_n_keyboard_report(USB_ITF_KEYBOARD, 0, modifiers, keycode);
-		}
+		if (state != KEY_STATE_HOLD)
+			tud_hid_n_keyboard_report(USB_ITF_KEYBOARD, 0, modifier, keycode);
 	}
 
 	if (tud_hid_n_ready(USB_ITF_MOUSE) && reg_is_bit_set(REG_ID_CF2, CF2_USB_MOUSE_ON)) {
-		if (key == KEY_COMPOSE) {
+		if (key == KEY_JOY_CENTER) {
 			if (state == KEY_STATE_PRESSED) {
 				self.mouse_btn = MOUSE_BUTTON_LEFT;
 				self.mouse_moved = false;

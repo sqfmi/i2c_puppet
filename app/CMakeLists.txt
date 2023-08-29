@@ -12,7 +12,6 @@ add_executable(i2c_puppet
 	usb.c
 	usb_descriptors.c
 	pi.c
-	rtc.c
 )
 
 add_compile_options(-Wall -Wextra -Wpedantic)

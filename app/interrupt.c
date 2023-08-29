@@ -8,7 +8,7 @@
 
 #include <pico/stdlib.h>
 
-static void key_cb(uint8_t key, enum key_state state)
+static void key_cb(char key, enum key_state state)
 {
 	(void)key;
 	(void)state;
@@ -44,6 +44,7 @@ static void key_lock_cb(bool caps_changed, bool num_changed)
 		gpio_put(PIN_INT, 1);
 	}
 }
+static struct key_lock_callback key_lock_callback = { .func = key_lock_cb };
 
 static void touch_cb(int8_t x, int8_t y)
 {
@@ -85,6 +86,7 @@ void interrupt_init(void)
 	gpio_put(PIN_INT, true);
 
 	keyboard_add_key_callback(&key_callback);
+	keyboard_add_lock_callback(&key_lock_callback);
 
 	touchpad_add_touch_callback(&touch_callback);
 
