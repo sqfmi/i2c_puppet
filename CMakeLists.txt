@@ -7,7 +7,6 @@ include(3rdparty/pico-sdk/pico_sdk_init.cmake)
 
 project(i2c_puppet)
 
-set(PICO_PLATFORM "rp2040")
 pico_sdk_init()
 
 add_subdirectory(app)
@@ -19,6 +18,3 @@ pico_set_program_version(i2c_puppet "0.1")
 # printf targets
 #pico_enable_stdio_usb(i2c_puppet 1)
 pico_enable_stdio_uart(i2c_puppet 1)
-
-target_link_libraries(i2c_puppet
-	hardware_rtc)

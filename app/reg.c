@@ -9,7 +9,6 @@
 #include "touchpad.h"
 #include "pi.h"
 #include "hardware/adc.h"
-#include "rtc.h"
 
 #include <pico/stdlib.h>
 #include <RP2040.h> // TODO: When there's more than one RP chip, change this to be more generic
@@ -59,8 +58,6 @@ void reg_process_packet(uint8_t in_reg, uint8_t in_data, uint8_t *out_buffer, ui
 	case REG_ID_ADR:
 	case REG_ID_IND:
 	case REG_ID_CF2:
-	case REG_ID_REWAKE_TIME:
-	case REG_ID_DRIVER_STATE:
 	{
 		if (is_write) {
 			reg_set_value(reg, in_data);
@@ -147,37 +144,6 @@ void reg_process_packet(uint8_t in_reg, uint8_t in_data, uint8_t *out_buffer, ui
 		break;
 	}
 
-	// Reawake timer
-	case REG_ID_REWAKE:
-	{
-		break;
-	}
-
-	// Real time clock
-	case REG_ID_RTC_SEC:
-	case REG_ID_RTC_MIN:
-	case REG_ID_RTC_HOUR:
-	case REG_ID_RTC_MDAY:
-	case REG_ID_RTC_MON:
-	case REG_ID_RTC_YEAR:
-	{
-		if (is_write) {
-			reg_set_value(reg, in_data);
-		} else {
-			out_buffer[0] = rtc_get(reg);
-			*out_len = sizeof(uint8_t);
-		}
-		break;
-	}
-
-	case REG_ID_RTC_COMMIT:
-	{
-		rtc_set(reg_get_value(REG_ID_RTC_YEAR), reg_get_value(REG_ID_RTC_MON),
-			reg_get_value(REG_ID_RTC_MDAY), reg_get_value(REG_ID_RTC_HOUR),
-			reg_get_value(REG_ID_RTC_MIN), reg_get_value(REG_ID_RTC_SEC));
-		break;
-	}
-
 	// read-only registers
 	case REG_ID_TOX:
 	case REG_ID_TOY:
@@ -201,15 +167,17 @@ void reg_process_packet(uint8_t in_reg, uint8_t in_data, uint8_t *out_buffer, ui
 
 	case REG_ID_KEY:
 		out_buffer[0] = fifo_count();
+		out_buffer[0] |= keyboard_get_numlock()  ? KEY_NUMLOCK  : 0x00;
+		out_buffer[0] |= keyboard_get_capslock() ? KEY_CAPSLOCK : 0x00;
 		*out_len = sizeof(uint8_t);
 		break;
 
 	case REG_ID_FIF:
 	{
-		struct fifo_item item = fifo_dequeue();
+		const struct fifo_item item = fifo_dequeue();
 
-		out_buffer[0] = ((uint8_t*)&item)[0];
-		out_buffer[1] = ((uint8_t*)&item)[1];
+		out_buffer[0] = (uint8_t)item.state;
+		out_buffer[1] = (uint8_t)item.key;
 		*out_len = sizeof(uint8_t) * 2;
 		break;
 	}
@@ -265,11 +233,10 @@ void reg_init(void)
 	reg_set_value(REG_ID_FRQ, 10);	// ms
 	reg_set_value(REG_ID_BK2, 255);
 	reg_set_value(REG_ID_PUD, 0xFF);
-	reg_set_value(REG_ID_HLD, 100);	// 10ms units
+	reg_set_value(REG_ID_HLD, 30);	// 10ms units
 	reg_set_value(REG_ID_ADR, 0x1F);
 	reg_set_value(REG_ID_IND, 1);	// ms
 	reg_set_value(REG_ID_CF2, CF2_TOUCH_INT | CF2_USB_KEYB_ON | CF2_USB_MOUSE_ON);
-	reg_set_value(REG_ID_DRIVER_STATE, 0); // Driver not yet loaded
 
 	touchpad_add_touch_callback(&touch_callback);
 }

@@ -6,15 +6,23 @@
 
 #include <pico/stdlib.h>
 
-// Size of the list keeping track of all the pressed keys
-#define MAX_TRACKED_KEYS 10
+#define LIST_SIZE	10 // size of the list keeping track of all the pressed keys
 
-static struct
+struct entry
 {
-	struct key_callback *key_callbacks;
-} self;
+	char chr;
+	char alt;
+	enum key_mod mod;
+};
 
-// Key and buttons definitions
+struct list_item
+{
+	const struct entry *p_entry;
+	uint32_t hold_start_time;
+	enum key_state state;
+	bool mods[KEY_MOD_ID_LAST];
+	char effective_key;
+};
 
 static const uint8_t row_pins[NUM_OF_ROWS] =
 {
@@ -29,211 +37,254 @@ static const uint8_t col_pins[NUM_OF_COLS] =
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wmissing-field-initializers"
 
-static const uint8_t kbd_entries[NUM_OF_ROWS][NUM_OF_COLS] =
-//  Touchpad center key
-{ { KEY_COMPOSE, KEY_W, KEY_G, KEY_S, KEY_L, KEY_H }
-, {         0x0, KEY_Q, KEY_R, KEY_E, KEY_O, KEY_U }
-//     Call button
-, {    KEY_OPEN, KEY_0, KEY_F, KEY_LEFTSHIFT, KEY_K, KEY_J }
-, {         0x0, KEY_SPACE, KEY_C, KEY_Z, KEY_M, KEY_N }
-//    Berry key  Symbol key
-, {   KEY_PROPS, KEY_RIGHTALT, KEY_T, KEY_D, KEY_I, KEY_Y }
-//      Back key Alt key
-, {     KEY_ESC, KEY_LEFTALT, KEY_V, KEY_X, KEY_MUTE, KEY_B }
-, {         0x0, KEY_A, KEY_RIGHTSHIFT, KEY_P, KEY_BACKSPACE, KEY_ENTER }
+/*
+
+In https://github.com/wallComputer/bbqX0kbd_driver/blob/main/source/mod_src/bbq20kbd_pmod_codes.h
+'f' is apped to KEY_ESC
+
+*/
+static const struct entry kbd_entries[][NUM_OF_COLS] =
+{
+	{ { KEY_JOY_CENTER },  { 'W', '1' },              { 'G', '/' },              { 'S', '4' },              { 'L', '"'  },  { 'H' , ':' } },
+	{ { },                 { 'Q', '#' },              { 'R', '3' },              { 'E', '2' },              { 'O', '+'  },  { 'U', '_'  } },
+	{ { KEY_BTN_LEFT1 },   { '~', '0' },              { 'F', '6' },              { .mod = KEY_MOD_ID_SHL }, { 'K', '\''  }, { 'J', ';'  } },
+	{ { },                 { ' ', '\t' },             { 'C', '9' },              { 'Z', '7' },              { 'M', '.'  },  { 'N', ','  } },
+	{ { KEY_BTN_LEFT2 },   { .mod = KEY_MOD_ID_SYM }, { 'T', '(' },              { 'D', '5' },              { 'I', '-'  },  { 'Y', ')'  } },
+	{ { KEY_BTN_RIGHT1 },  { .mod = KEY_MOD_ID_ALT }, { 'V', '?' },              { 'X', '8' },              { '$', '`'  },  { 'B', '!'  } },
+	{ { },                 { 'A', '*' },              { .mod = KEY_MOD_ID_SHR }, { 'P', '@' },              { '\b', 'f' },       { '\n', '|' } },
 };
-static bool kbd_pressed_state[NUM_OF_ROWS][NUM_OF_COLS] = {};
 
 #if NUM_OF_BTNS > 0
+static const struct entry btn_entries[NUM_OF_BTNS] =
+{
+	BTN_KEYS
+};
 
-// Call end key mapped to GPIO 4
-static const char btn_entries[NUM_OF_BTNS] = { KEY_POWER };
-static const uint8_t btn_pins[NUM_OF_BTNS] = { 4 };
+static const uint8_t btn_pins[NUM_OF_BTNS] =
+{
+	PINS_BTNS
+};
 #endif
 
 #pragma GCC diagnostic pop
 
-struct hold_key
+static struct
 {
-	uint8_t keycode;
-	enum key_state state;
-	uint hold_start_time;
-};
+	struct key_lock_callback *lock_callbacks;
+	struct key_callback *key_callbacks;
 
-static struct hold_key power_hold_key;
-static struct hold_key left_shift_hold_key;
-static struct hold_key right_shift_hold_key;
-static struct hold_key phys_alt_hold_key;
-static struct hold_key sym_hold_key;
+	struct list_item list[LIST_SIZE];
 
-static int64_t release_power_key_alarm_callback(alarm_id_t _, void* __)
+	bool mods[KEY_MOD_ID_LAST];
+
+	bool capslock_changed;
+	bool capslock;
+
+	bool numlock_changed;
+	bool numlock;
+} self;
+
+static int64_t rk(alarm_id_t id, void *user_data)
 {
-	keyboard_inject_event(KEY_POWER, KEY_STATE_RELEASED);
+	(void)id;
+
+	const int data = (int)user_data;
+
+	keyboard_inject_event((char)data, KEY_STATE_RELEASED);
 
 	return 0;
 }
 
-static int64_t pi_power_on_alarm_callback(alarm_id_t _, void* __)
+static void transition_to(struct list_item * const p_item, const enum key_state next_state)
 {
-	pi_power_on();
+	const struct entry * const p_entry = p_item->p_entry;
 
-	return 0;
-}
+	p_item->state = next_state;
 
-static void transition_hold_key_state(struct hold_key* hold_key, bool const pressed)
-{
-	uint key_held_for;
+	if (!p_entry)
+		return;
 
-	switch (hold_key->state) {
+	if (p_item->effective_key == '\0') {
+		char key = p_entry->chr;
+		switch (p_entry->mod) {
+			case KEY_MOD_ID_ALT:
+				if (reg_is_bit_set(REG_ID_CFG, CFG_REPORT_MODS))
+					key = KEY_MOD_ALT;
+				break;
 
-		// Idle -> Pressed
-		case KEY_STATE_IDLE:
-			if (pressed) {
-				hold_key->state = KEY_STATE_PRESSED;
+			case KEY_MOD_ID_SHL:
+				if (reg_is_bit_set(REG_ID_CFG, CFG_REPORT_MODS))
+					key = KEY_MOD_SHL;
+				break;
 
-				// Track hold time for transitioning to Hold and Long Hold states
-				hold_key->hold_start_time = to_ms_since_boot(get_absolute_time());
-			}
-			break;
+			case KEY_MOD_ID_SHR:
+				if (reg_is_bit_set(REG_ID_CFG, CFG_REPORT_MODS))
+					key = KEY_MOD_SHR;
+				break;
 
-		// Pressed -> Hold | Released
-		case KEY_STATE_PRESSED:
-			key_held_for = to_ms_since_boot(get_absolute_time())
-				- hold_key->hold_start_time;
-			if (key_held_for > (reg_get_value(REG_ID_HLD) * 10)) {
-				hold_key->state = KEY_STATE_HOLD;
+			case KEY_MOD_ID_SYM:
+				if (reg_is_bit_set(REG_ID_CFG, CFG_REPORT_MODS))
+					key = KEY_MOD_SYM;
+				break;
 
-			} else if (!pressed) {
-				hold_key->state = KEY_STATE_RELEASED;
-			}
-			break;
+			default:
+			{
+				if (reg_is_bit_set(REG_ID_CFG, CFG_USE_MODS)) {
+					const bool shift = (self.mods[KEY_MOD_ID_SHL] || self.mods[KEY_MOD_ID_SHR]) | self.capslock;
+					const bool alt = self.mods[KEY_MOD_ID_ALT] | self.numlock;
+					const bool is_button = (key <= KEY_BTN_RIGHT1) || ((key >= KEY_BTN_LEFT2) && (key <= KEY_BTN_RIGHT2));
 
-		// Hold -> Released | Long Hold
-		case KEY_STATE_HOLD:
-			if (!pressed) {
-				hold_key->state = KEY_STATE_RELEASED;
-
-			// Power key can be long hold
-			} else if (hold_key->keycode == KEY_POWER) {
-
-				// Driver unloaded, power back on
-				if (reg_get_value(REG_ID_DRIVER_STATE) == 0) {
-					add_alarm_in_ms(10, pi_power_on_alarm_callback, NULL, true);
-					hold_key->state = KEY_STATE_LONG_HOLD;
-
-				// Driver loaded, send power off
-				} else {
-
-					// Check for long hold time
-					key_held_for = to_ms_since_boot(get_absolute_time())
-						- hold_key->hold_start_time;
-					if (key_held_for > LONG_HOLD_MS) {
-
-						// Simulate press event and schedule release
-						keyboard_inject_event(KEY_POWER, KEY_STATE_PRESSED);
-						add_alarm_in_ms(10, release_power_key_alarm_callback, NULL, true);
-
-						hold_key->state = KEY_STATE_LONG_HOLD;
+					if (alt && !is_button) {
+						key = p_entry->alt;
+					} else if (!shift && (key >= 'A' && key <= 'Z')) {
+						key = (key + ' ');
 					}
 				}
+
+				break;
+			}
+		}
+
+		p_item->effective_key = key;
+	}
+
+	if (p_item->effective_key == '\0')
+		return;
+
+	keyboard_inject_event(p_item->effective_key, next_state);
+}
+
+static void next_item_state(struct list_item * const p_item, const bool pressed)
+{
+	switch (p_item->state) {
+		case KEY_STATE_IDLE:
+			if (pressed) {
+				if (p_item->p_entry->mod != KEY_MOD_ID_NONE)
+					self.mods[p_item->p_entry->mod] = true;
+
+				if (!self.capslock_changed && self.mods[KEY_MOD_ID_SHR] && self.mods[KEY_MOD_ID_ALT]) {
+					self.capslock = true;
+					self.capslock_changed = true;
+				}
+
+				if (!self.numlock_changed && self.mods[KEY_MOD_ID_SHL] && self.mods[KEY_MOD_ID_ALT]) {
+					self.numlock = true;
+					self.numlock_changed = true;
+				}
+
+				if (!self.capslock_changed && (self.mods[KEY_MOD_ID_SHL] || self.mods[KEY_MOD_ID_SHR])) {
+					self.capslock = false;
+					self.capslock_changed = true;
+				}
+
+				if (!self.numlock_changed && (self.mods[KEY_MOD_ID_SHL] || self.mods[KEY_MOD_ID_SHR])) {
+					self.numlock = false;
+					self.numlock_changed = true;
+				}
+
+				if (!self.mods[KEY_MOD_ID_ALT]) {
+					self.capslock_changed = false;
+					self.numlock_changed = false;
+				}
+
+				if (self.lock_callbacks && (self.capslock_changed || self.numlock_changed)) {
+					struct key_lock_callback *cb = self.lock_callbacks;
+					while (cb) {
+						cb->func(self.capslock_changed, self.numlock_changed);
+
+						cb = cb->next;
+					}
+				}
+
+				transition_to(p_item, KEY_STATE_PRESSED);
+
+				p_item->hold_start_time = to_ms_since_boot(get_absolute_time());
 			}
 			break;
 
-		// Long Hold -> Released
-		case KEY_STATE_LONG_HOLD:
+		case KEY_STATE_PRESSED:
+			if ((to_ms_since_boot(get_absolute_time()) - p_item->hold_start_time) > (reg_get_value(REG_ID_HLD) * 10)) {
+				transition_to(p_item, KEY_STATE_HOLD);
+			 } else if(!pressed) {
+				transition_to(p_item, KEY_STATE_RELEASED);
+			}
+			break;
+
+		case KEY_STATE_HOLD:
 			if (!pressed) {
-				hold_key->state = KEY_STATE_RELEASED;
+				transition_to(p_item, KEY_STATE_RELEASED);
+			} else if ((to_ms_since_boot(get_absolute_time()) - p_item->hold_start_time) > LONG_HOLD_MS) {
+				if(p_item->effective_key == KEY_BTN_RIGHT2){
+					//inject power key
+					char key = KEY_POWER;
+					keyboard_inject_event(key, KEY_STATE_PRESSED);
+					//delay release key
+					add_alarm_in_ms(10, rk, (void*)(int)key, true);
+				}
+				transition_to(p_item, KEY_STATE_LONG_HOLD);
 			}
 			break;
 
-		// Released -> Idle
+		case KEY_STATE_LONG_HOLD:
+			if (!pressed)
+				transition_to(p_item, KEY_STATE_RELEASED);
+			break;			
+
 		case KEY_STATE_RELEASED:
-			hold_key->state = KEY_STATE_IDLE;
+		{
+			if (p_item->p_entry->mod != KEY_MOD_ID_NONE)
+				self.mods[p_item->p_entry->mod] = false;
+
+			p_item->p_entry = NULL;
+			p_item->effective_key = '\0';
+			transition_to(p_item, KEY_STATE_IDLE);
 			break;
+		}
 	}
-}
-
-// Return whether key event should be sent to queue
-static bool handle_hold_key_event(struct hold_key* hold_key, enum key_state* state,
-	bool pressed)
-{
-	// Save previous state
-	*state = hold_key->state;
-
-	// Transition state
-	transition_hold_key_state(hold_key, pressed);
-
-	// Compare to previous state
-	if (*state != hold_key->state) {
-		*state = hold_key->state;
-
-		// Only send pressed, released, or hold events
-		return (*state == KEY_STATE_PRESSED)
-			|| (*state == KEY_STATE_RELEASED)
-			|| (*state == KEY_STATE_HOLD);
-	}
-
-	return false;
-}
-
-static void handle_key_event(uint r, uint c, bool pressed)
-{
-	uint8_t keycode;
-	bool send_update = false;
-	enum key_state state;
-
-	// Get keycode
-	keycode = kbd_entries[r][c];
-
-	// Don't send power key over USB
-	if ((keycode == 0) || (keycode == KEY_POWER)) {
-		return;
-	}
-
-	// Handle holdable modifiers
-	if (keycode == left_shift_hold_key.keycode) {
-		send_update = handle_hold_key_event(&left_shift_hold_key, &state, pressed);
-
-	} else if (keycode == left_shift_hold_key.keycode) {
-		send_update = handle_hold_key_event(&left_shift_hold_key, &state, pressed);
-
-	} else if (keycode == phys_alt_hold_key.keycode) {
-		send_update = handle_hold_key_event(&phys_alt_hold_key, &state, pressed);
-
-	} else if (keycode == sym_hold_key.keycode) {
-		send_update = handle_hold_key_event(&sym_hold_key, &state, pressed);
-
-	// Basic press / release alpha key
-	} else {
-		send_update = (kbd_pressed_state[r][c] != pressed);
-		kbd_pressed_state[r][c] = pressed;
-		state = (pressed) ? KEY_STATE_PRESSED : KEY_STATE_RELEASED;
-	}
-
-	// Don't send duplicate key events
-	if (!send_update) {
-		return;
-	}
-
-	// Report key to input system
-	keyboard_inject_event(keycode, state);
 }
 
 static int64_t timer_task(alarm_id_t id, void *user_data)
 {
 	(void)id;
 	(void)user_data;
-	uint c, r, i;
-	bool pressed;
 
-	for (c = 0; c < NUM_OF_COLS; c++) {
+	for (uint32_t c = 0; c < NUM_OF_COLS; ++c) {
 		gpio_pull_up(col_pins[c]);
 		gpio_put(col_pins[c], 0);
 		gpio_set_dir(col_pins[c], GPIO_OUT);
 
-		for (r = 0; r < NUM_OF_ROWS; r++) {
-			pressed = (gpio_get(row_pins[r]) == 0);
-			handle_key_event(r, c, pressed);
+		for (uint32_t r = 0; r < NUM_OF_ROWS; ++r) {
+			const bool pressed = (gpio_get(row_pins[r]) == 0);
+			const int32_t key_idx = (int32_t)((r * NUM_OF_COLS) + c);
+
+			int32_t list_idx = -1;
+			for (int32_t i = 0; i < LIST_SIZE; ++i) {
+				if (self.list[i].p_entry != &((const struct entry*)kbd_entries)[key_idx])
+					continue;
+
+				list_idx = i;
+				break;
+			}
+
+			if (list_idx > -1) {
+				next_item_state(&self.list[list_idx], pressed);
+				continue;
+			}
+
+			if (!pressed)
+				continue;
+
+			for (uint32_t i = 0 ; i < LIST_SIZE; ++i) {
+				if (self.list[i].p_entry != NULL)
+					continue;
+
+				self.list[i].p_entry = &((const struct entry*)kbd_entries)[key_idx];
+				self.list[i].effective_key = '\0';
+				self.list[i].state = KEY_STATE_IDLE;
+				next_item_state(&self.list[i], pressed);
+
+				break;
+			}
 		}
 
 		gpio_put(col_pins[c], 1);
@@ -242,9 +293,37 @@ static int64_t timer_task(alarm_id_t id, void *user_data)
 	}
 
 #if NUM_OF_BTNS > 0
-	for (i = 0; i < NUM_OF_BTNS; i++) {
-		pressed = (gpio_get(btn_pins[i]) == 0);
-		transition_hold_key_state(&power_hold_key, pressed);
+	for (uint32_t b = 0; b < NUM_OF_BTNS; ++b) {
+		const bool pressed = (gpio_get(btn_pins[b]) == 0);
+
+		int32_t list_idx = -1;
+		for (int32_t i = 0; i < LIST_SIZE; ++i) {
+			if (self.list[i].p_entry != &((const struct entry*)btn_entries)[b])
+				continue;
+
+			list_idx = i;
+			break;
+		}
+
+		if (list_idx > -1) {
+			next_item_state(&self.list[list_idx], pressed);
+			continue;
+		}
+
+		if (!pressed)
+			continue;
+
+		for (uint32_t i = 0 ; i < LIST_SIZE; ++i) {
+			if (self.list[i].p_entry != NULL)
+				continue;
+
+			self.list[i].p_entry = &((const struct entry*)btn_entries)[b];
+			self.list[i].effective_key = '\0';
+			self.list[i].state = KEY_STATE_IDLE;
+			next_item_state(&self.list[i], pressed);
+
+			break;
+		}
 	}
 #endif
 
@@ -252,27 +331,48 @@ static int64_t timer_task(alarm_id_t id, void *user_data)
 	return -(reg_get_value(REG_ID_FRQ) * 1000);
 }
 
-void keyboard_inject_event(uint8_t key, enum key_state state)
+void keyboard_inject_event(char key, enum key_state state)
 {
-	struct fifo_item item;
-	item.scancode = key;
-	item.state = state;
-
+	const struct fifo_item item = { key, state };
 	if (!fifo_enqueue(item)) {
-		if (reg_is_bit_set(REG_ID_CFG, CFG_OVERFLOW_INT)) {
+		if (reg_is_bit_set(REG_ID_CFG, CFG_OVERFLOW_INT))
 			reg_set_bit(REG_ID_INT, INT_OVERFLOW);
-		}
 
-		if (reg_is_bit_set(REG_ID_CFG, CFG_OVERFLOW_ON)) {
+		if (reg_is_bit_set(REG_ID_CFG, CFG_OVERFLOW_ON))
 			fifo_enqueue_force(item);
-		}
 	}
 
 	struct key_callback *cb = self.key_callbacks;
 	while (cb) {
 		cb->func(key, state);
+
 		cb = cb->next;
 	}
+}
+
+bool keyboard_is_key_down(char key)
+{
+	for (int32_t i = 0; i < LIST_SIZE; ++i) {
+		struct list_item *item = &self.list[i];
+
+		if (item->p_entry == NULL)
+			continue;
+
+		if ((item->state != KEY_STATE_PRESSED) && (item->state != KEY_STATE_HOLD) && (item->state != KEY_STATE_LONG_HOLD))
+			continue;
+
+		if (item->effective_key != key)
+			continue;
+
+		return true;
+	}
+
+	return false;
+}
+
+bool keyboard_is_mod_on(enum key_mod mod)
+{
+	return self.mods[mod];
 }
 
 void keyboard_add_key_callback(struct key_callback *callback)
@@ -285,49 +385,64 @@ void keyboard_add_key_callback(struct key_callback *callback)
 
 	// find last and insert after
 	struct key_callback *cb = self.key_callbacks;
-	while (cb->next) {
+	while (cb->next)
 		cb = cb->next;
-	}
+
 	cb->next = callback;
+}
+
+void keyboard_add_lock_callback(struct key_lock_callback *callback)
+{
+	// first callback
+	if (!self.lock_callbacks) {
+		self.lock_callbacks = callback;
+		return;
+	}
+
+	// find last and insert after
+	struct key_lock_callback *cb = self.lock_callbacks;
+	while (cb->next)
+		cb = cb->next;
+
+	cb->next = callback;
+}
+
+bool keyboard_get_capslock(void)
+{
+	return self.capslock;
+}
+
+bool keyboard_get_numlock(void)
+{
+	return self.numlock;
 }
 
 void keyboard_init(void)
 {
-	uint i;
+	for (int i = 0; i < KEY_MOD_ID_LAST; ++i)
+		self.mods[i] = false;
 
-	// GPIO rows
-	for (i = 0; i < NUM_OF_ROWS; ++i) {
+	// rows
+	for (uint32_t i = 0; i < NUM_OF_ROWS; ++i) {
 		gpio_init(row_pins[i]);
 		gpio_pull_up(row_pins[i]);
 		gpio_set_dir(row_pins[i], GPIO_IN);
 	}
 
-	// GPIO columns
-	for(i = 0; i < NUM_OF_COLS; ++i) {
+	// cols
+	for(uint32_t i = 0; i < NUM_OF_COLS; ++i) {
 		gpio_init(col_pins[i]);
 		gpio_set_dir(col_pins[i], GPIO_IN);
 	}
 
-	// GPIO buttons
+	// btns
 #if NUM_OF_BTNS > 0
-	for(i = 0; i < NUM_OF_BTNS; ++i) {
+	for(uint32_t i = 0; i < NUM_OF_BTNS; ++i) {
 		gpio_init(btn_pins[i]);
 		gpio_pull_up(btn_pins[i]);
 		gpio_set_dir(btn_pins[i], GPIO_IN);
 	}
 #endif
-
-	// Holdable modfiier keys
-	power_hold_key.keycode = KEY_POWER;
-	power_hold_key.state = KEY_STATE_IDLE;
-	left_shift_hold_key.keycode = KEY_LEFTSHIFT;
-	left_shift_hold_key.state = KEY_STATE_IDLE;
-	right_shift_hold_key.keycode = KEY_RIGHTSHIFT;
-	right_shift_hold_key.state = KEY_STATE_IDLE;
-	phys_alt_hold_key.keycode = KEY_LEFTALT;
-	phys_alt_hold_key.state = KEY_STATE_IDLE;
-	sym_hold_key.keycode = KEY_RIGHTALT;
-	sym_hold_key.state = KEY_STATE_IDLE;
 
 	add_alarm_in_ms(reg_get_value(REG_ID_FRQ), timer_task, NULL, true);
 }

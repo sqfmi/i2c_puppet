@@ -2,8 +2,6 @@
 #include <stdio.h>
 #include <tusb.h>
 
-#include <hardware/rtc.h>
-
 #include "backlight.h"
 #include "debug.h"
 #include "gpioexp.h"
@@ -33,8 +31,6 @@ int main(void)
 	debug_init();
 #endif
 
-	rtc_init();
-
 	reg_init();
 
 	backlight_init();
@@ -52,9 +48,7 @@ int main(void)
 	// For now, the `gpio` param is ignored and all enabled GPIOs generate the irq
 	gpio_set_irq_enabled_with_callback(0xFF, 0, true, &gpio_irq);
 
-	led_init();
-	pi_power_init();
-	pi_power_on();
+	pi_init(); //turns on the pi
 
 #ifndef NDEBUG
 	printf("Starting main loop\r\n");
