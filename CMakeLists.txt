@@ -14,7 +14,7 @@ add_subdirectory(app)
 
 # binary info in flash
 pico_set_program_name(i2c_puppet "I2C Puppet")
-pico_set_program_version(i2c_puppet "0.1")
+pico_set_program_version(i2c_puppet "2.2")
 
 # printf targets
 #pico_enable_stdio_usb(i2c_puppet 1)
