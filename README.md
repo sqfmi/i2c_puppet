@@ -340,9 +340,43 @@ This register can be read and written to, it is 1 byte in size.
 
 Default value: 0
 
-## Version history
+### Firmware update (REG_UPDATE_DATA = 0x30)
 
-	v1.0:
-	- Initial release
+Starting with Beepy firmware 3.0, firmware is loaded in two stages.
 
-See here for the legacy project's history: https://github.com/solderparty/bbq10kbd_i2c_sw#version-history
+The first stage is a modified version of [pico-flashloader](https://github.com/rhulme/pico-flashloader).
+It allows updates to be flashed to the second stage firmware while booted.
+
+The second stage is the actual Beepy firmware.
+
+Reading `REG_UPDATE_DATA` will return an update status code
+
+- `UPDATE_OFF = 0`
+- `UPDATE_RECV = 1`
+- `UPDATE_FAILED = 2`
+- `UPDATE_FAILED_LINE_OVERFLOW = 3`
+- `UPDATE_FAILED_FLASH_EMPTY = 4`
+- `UPDATE_FAILED_FLASH_OVERFLOW = 5`
+- `UPDATE_FAILED_BAD_LINE = 6`
+- `UPDATE_FAILED_BAD_CHECKSUM = 7`
+
+Firmware updates are flashed by writing byte-by-byte to `REG_UPDATE_DATA`:
+
+- Header line beginning with `+` e.g. `+Beepy`
+- Followed by the contents of an image in Intel HEX format
+
+By default, `REG_UPDATE_DATA` will be set to `UPDATE_OFF`.
+After writing, `REG_UPDATE_DATA` will be set to `UPDATE_RECV` if more data is expected.
+
+If the update completes successfully:
+
+- `REG_UPDATE_DATA` will be set to `UPDATE_OFF`
+- Shutdown signal will be sent to the Pi
+- Delay to allow the Pi to cleanly shut down before poweroff (configurable with `REG_SHUTDOWN_GRACE`)
+- Firmware is flashed and the system is reset
+
+Please wait until the system reboots on its own before removing power.
+
+If the update failed, `REG_UPDATE_DATA` will contain an error code and the firmware will not be modified.
+
+The header line `+...` will reset the update process, so an interrupted or failed update can be retried by restarting the firmware write.
