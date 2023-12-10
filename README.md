@@ -45,7 +45,7 @@ See the `boards` directory for a list of available boards.
 
     mkdir build
     cd build
-    cmake -DPICO_BOARD=beepberry -DCMAKE_BUILD_TYPE=Debug ..
+    cmake -DPICO_BOARD=beepy -DCMAKE_BUILD_TYPE=Debug ..
     make
 
 ## Vendor USB Class
