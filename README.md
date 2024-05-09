@@ -25,19 +25,30 @@ This firmware targets the Beepy hardware. It can still act as a USB keyboard, bu
 
 Physical alt does not send an actual Alt key, but remaps the output scancodes to the range 135 to 161 in QWERTY order. This should be combined with a keymap for proper symbol output. This allows symbols to be customized without rebuilding the firmware, as well as proper use of the actual Alt key.
 
-### The rest of the Readme
+## Quick Start
 
-I have not yet updated any other part of the Readme file.
+    git clone https://github.com/solderparty/i2c_puppet
+    cd i2c_puppet
+    ./new-docker-build.sh
 
-## Checkout
+## Checkout / Init Submodules
 
-The code depends on the Raspberry Pi Pico SDK, which is added as a submodule. Because the Pico SDK includes TinyUSB as a module, it is not recommended to do a recursive submodule init, and rather follow these steps:
+This repository depends on the Raspberry Pi Pico SDK, which is added as a submodule.
+Because the Pico SDK includes TinyUSB as its own module,
+it is not recommended to do a recursive submodule init,
+and rather follow these steps:
 
     git clone https://github.com/solderparty/i2c_puppet
     cd i2c_puppet
     git submodule update --init
     cd 3rdparty/pico-sdk
     git submodule update --init
+
+Alternatively, feel free to invoke the `initialize-submodules.sh` script.
+
+    ./initialize-submodules.sh
+
+This script will perform the equivalent and inform you of the submodules current statuses.
 
 ## Build
 
@@ -47,6 +58,60 @@ See the `boards` directory for a list of available boards.
     cd build
     cmake -DPICO_BOARD=beepy -DCMAKE_BUILD_TYPE=Debug ..
     make
+
+## Docker Build
+
+If you don't have the dependencies for building this project on your system,
+
+you can also use a script that will run the build command using docker.
+
+    ./new-docker-build.sh
+
+The `new-docker-build.sh` script will invoke the commands from the `Build` section,
+
+using the `djflix/rpi-pico-builder:latest` Docker image.
+
+It will also ensure appropriate submodules have been at least initialized.
+
+If any issues building, first try a "Clean Run" by deleting the `build` directory.
+
+Due to how docker works, files in `build` may be owned by root and require `sudo` to delete.
+
+To automatically trigger a "Clean Run",
+
+    sudo ./new-docker-build.sh clean
+
+provide any argument to the `new-docker-build.sh` script while using `sudo`.
+
+## Reset Submodules
+
+If you need to reset the submodule state for some reason,
+feel free to invoke the `reset-submodules.sh` script.
+
+    ./reset-submodules.sh
+
+## Update Submodules
+
+In general, one should avoid updating or changing anything inside the submodules.
+
+Submodules should be changed in their respective origin repositories first.
+
+Submodules of submodules cannot be updated from a superproject (parent of at least one submodule.)
+
+If submodule updates are needed, it's recommend to:
+- ensure your code changes have landed in the appropriate origin repository branch.
+- if your code changes are to a submodule of a submodule,
+  - ensure your code changes have propogated up to each superproject (parent of at least one submodule) in the chain.
+- make a separate branch in this repo just for submodule updates.
+- perform your submodule update for the direct submodule of this superproject (parent of at least one submodule):
+  - <!-- this comment is to prevent automatic whitespace trimming -->
+    ```
+    git submodule update --remote "3rdparty/pico-sdk"
+    ```
+
+## The rest of the Readme
+
+The rest of the Readme file is effectively unchanged from upstream.
 
 ## Vendor USB Class
 
